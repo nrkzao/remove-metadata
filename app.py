@@ -2,8 +2,10 @@ import os
 import io
 import zipfile
 from flask import Flask, request, send_file, render_template_string, jsonify
-from PIL import Image
+from PIL import Image, ImageFile
 import pypdf
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
@@ -206,7 +208,8 @@ def process():
     for f in files:
         name = f.filename or 'file'
         ext = os.path.splitext(name)[1].lower()
-        data = f.read()
+        f.stream.seek(0)
+        data = f.stream.read()
         try:
             if ext in ('.jpg', '.jpeg'):
                 cleaned = clean_jpg(data)
