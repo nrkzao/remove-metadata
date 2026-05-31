@@ -30,10 +30,16 @@ HTML = """<!DOCTYPE html>
   .formats { color: #a0aec0; font-size: 0.8rem; margin-top: 8px; }
   #fileInput { display: none; }
   .file-list { margin-bottom: 20px; }
-  .file-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #f7fafc; border-radius: 8px; margin-bottom: 8px; font-size: 0.88rem; }
+  .file-item { background: #f7fafc; border-radius: 8px; margin-bottom: 8px; font-size: 0.88rem; overflow: hidden; }
+  .file-item-top { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px 6px; }
+  .file-item-bottom { display: flex; align-items: center; padding: 0 14px 10px; gap: 6px; }
   .file-name { color: #2d3748; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; }
   .file-size { color: #a0aec0; font-size: 0.8rem; white-space: nowrap; }
   .remove-btn { background: none; border: none; color: #fc8181; cursor: pointer; font-size: 1.1rem; padding: 0 4px; }
+  .rename-label { color: #718096; font-size: 0.78rem; white-space: nowrap; }
+  .rename-input { flex: 1; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 8px; font-size: 0.82rem; color: #2d3748; outline: none; }
+  .rename-input:focus { border-color: #667eea; }
+  .rename-ext { color: #a0aec0; font-size: 0.82rem; white-space: nowrap; }
   .btn { width: 100%; padding: 14px; border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.2s; }
   .btn-primary { background: linear-gradient(135deg, #667eea, #764ba2); color: white; }
   .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
@@ -73,6 +79,7 @@ HTML = """<!DOCTYPE html>
 </div>
 <script>
   let selectedFiles = [];
+  let customNames = {};
 
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
@@ -93,23 +100,44 @@ HTML = """<!DOCTYPE html>
     const allowed = ['image/jpeg', 'image/png', 'application/pdf'];
     files.forEach(f => {
       if (!allowed.includes(f.type) && !f.name.match(/[.](jpg|jpeg|png|pdf)$/i)) return;
-      if (!selectedFiles.find(x => x.name === f.name && x.size === f.size)) selectedFiles.push(f);
+      if (!selectedFiles.find(x => x.name === f.name && x.size === f.size)) {
+        selectedFiles.push(f);
+        const base = f.name.replace(/\.[^.]+$/, '');
+        customNames[f.name] = base;
+      }
     });
     renderList();
   }
 
+  function getExt(name) { return name.match(/(\.[^.]+)$/)?.[1] || ''; }
+
   function renderList() {
-    fileList.innerHTML = selectedFiles.map((f, i) => `
+    fileList.innerHTML = selectedFiles.map((f, i) => {
+      const ext = getExt(f.name);
+      const val = customNames[f.name] || f.name.replace(/\.[^.]+$/, '');
+      return `
       <div class="file-item">
-        <span class="file-name">${f.name}</span>
-        <span class="file-size">${(f.size/1024/1024).toFixed(2)} MB</span>
-        <button class="remove-btn" onclick="removeFile(${i})">✕</button>
-      </div>`).join('');
+        <div class="file-item-top">
+          <span class="file-name">${f.name}</span>
+          <span class="file-size">${(f.size/1024/1024).toFixed(2)} MB</span>
+          <button class="remove-btn" onclick="removeFile(${i})">✕</button>
+        </div>
+        <div class="file-item-bottom">
+          <span class="rename-label">保存名:</span>
+          <input class="rename-input" type="text" value="${val}" oninput="customNames['${f.name}']=this.value" placeholder="ファイル名（拡張子不要）">
+          <span class="rename-ext">${ext}</span>
+        </div>
+      </div>`;
+    }).join('');
     processBtn.disabled = selectedFiles.length === 0;
     status.style.display = 'none';
   }
 
-  function removeFile(i) { selectedFiles.splice(i, 1); renderList(); }
+  function removeFile(i) {
+    delete customNames[selectedFiles[i].name];
+    selectedFiles.splice(i, 1);
+    renderList();
+  }
 
   async function processFiles() {
     if (!selectedFiles.length) return;
@@ -118,7 +146,12 @@ HTML = """<!DOCTYPE html>
     status.style.display = 'none';
 
     const form = new FormData();
-    selectedFiles.forEach(f => form.append('files', f));
+    selectedFiles.forEach(f => {
+      form.append('files', f);
+      const ext = getExt(f.name);
+      const base = (customNames[f.name] || f.name.replace(/\.[^.]+$/, '')).trim() || f.name.replace(/\.[^.]+$/, '');
+      form.append('names', base + ext);
+    });
 
     try {
       const res = await fetch('/process', { method: 'POST', body: form });
@@ -199,27 +232,33 @@ def clean_pdf(data: bytes) -> bytes:
 @app.route('/process', methods=['POST'])
 def process():
     files = request.files.getlist('files')
+    custom_names = request.form.getlist('names')
     if not files:
         return jsonify({'error': 'ファイルが選択されていません'}), 400
 
     results = []
     errors = []
 
-    for f in files:
+    for idx, f in enumerate(files):
         name = f.filename or 'file'
         ext = os.path.splitext(name)[1].lower()
+        # クライアント指定の保存名があれば使用、なければ元のファイル名を使用
+        if idx < len(custom_names) and custom_names[idx].strip():
+            out_base = os.path.splitext(custom_names[idx])[0]
+        else:
+            out_base = os.path.splitext(name)[0]
         f.stream.seek(0)
         data = f.stream.read()
         try:
             if ext in ('.jpg', '.jpeg'):
                 cleaned = clean_jpg(data)
-                out_name = os.path.splitext(name)[0] + '_cleaned.jpg'
+                out_name = out_base + '.jpg'
             elif ext == '.png':
                 cleaned = clean_png(data)
-                out_name = os.path.splitext(name)[0] + '_cleaned.png'
+                out_name = out_base + '.png'
             elif ext == '.pdf':
                 cleaned = clean_pdf(data)
-                out_name = os.path.splitext(name)[0] + '_cleaned.pdf'
+                out_name = out_base + '.pdf'
             else:
                 errors.append(f'{name}: 対応していない形式')
                 continue
