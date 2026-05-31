@@ -3,7 +3,6 @@ import io
 import zipfile
 from flask import Flask, request, send_file, render_template_string, jsonify
 from PIL import Image
-import piexif
 import pypdf
 
 app = Flask(__name__)
@@ -122,8 +121,9 @@ HTML = """<!DOCTYPE html>
     try {
       const res = await fetch('/process', { method: 'POST', body: form });
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || '処理に失敗しました');
+        let msg = '処理に失敗しました';
+        try { const err = await res.json(); msg = err.error || msg; } catch {}
+        throw new Error(msg);
       }
       const blob = await res.blob();
       const cd = res.headers.get('Content-Disposition') || '';
@@ -159,19 +159,16 @@ def index():
 def clean_jpg(data: bytes) -> bytes:
     img = Image.open(io.BytesIO(data))
     out = io.BytesIO()
-    img_no_exif = Image.new(img.mode, img.size)
-    img_no_exif.putdata(list(img.getdata()))
-    save_kwargs = {'format': 'JPEG', 'quality': 95}
-    img_no_exif.save(out, **save_kwargs)
+    # Strip all metadata by saving without exif/info
+    img.save(out, format='JPEG', quality=95, exif=b'')
     return out.getvalue()
 
 
 def clean_png(data: bytes) -> bytes:
     img = Image.open(io.BytesIO(data))
     out = io.BytesIO()
-    img_clean = Image.new(img.mode, img.size)
-    img_clean.putdata(list(img.getdata()))
-    img_clean.save(out, format='PNG', optimize=True)
+    # Save with empty metadata dict to strip all chunks
+    img.save(out, format='PNG', optimize=True, pnginfo=None)
     return out.getvalue()
 
 
