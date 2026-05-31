@@ -91,7 +91,7 @@ HTML = """<!DOCTYPE html>
   function addFiles(files) {
     const allowed = ['image/jpeg', 'image/png', 'application/pdf'];
     files.forEach(f => {
-      if (!allowed.includes(f.type) && !f.name.match(/\.(jpg|jpeg|png|pdf)$/i)) return;
+      if (!allowed.includes(f.type) && !f.name.match(/[.](jpg|jpeg|png|pdf)$/i)) return;
       if (!selectedFiles.find(x => x.name === f.name && x.size === f.size)) selectedFiles.push(f);
     });
     renderList();
