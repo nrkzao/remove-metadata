@@ -156,18 +156,50 @@ def index():
     return render_template_string(HTML)
 
 
+def strip_jpeg_segments(data: bytes) -> bytes:
+    """JPEGバイナリからAPP1〜APP15（Exif/XMP/IPTC等）を全て除去する"""
+    if data[:2] != b'\xff\xd8':
+        raise ValueError('JPEGファイルではありません')
+    out = bytearray(b'\xff\xd8')
+    i = 2
+    while i < len(data):
+        if data[i] != 0xff:
+            break
+        marker = data[i:i+2]
+        i += 2
+        # マーカーのみ（長さフィールドなし）: SOI, EOI, RST
+        if marker[1] in (0xd8, 0xd9) or (0xd0 <= marker[1] <= 0xd7):
+            out += marker
+            continue
+        if i + 2 > len(data):
+            break
+        length = int.from_bytes(data[i:i+2], 'big')
+        segment = data[i:i+length]
+        i += length
+        # APP1〜APP15 (0xffe1〜0xffef) を除去（Exif/XMP/IPTC/所有者情報等）
+        # APP13 (0xffed) も除去（Photoshop/IPTC: 作成者・著作権）
+        if 0xe1 <= marker[1] <= 0xef:
+            continue
+        # COM (0xfffe) コメントも除去
+        if marker[1] == 0xfe:
+            continue
+        out += marker + segment
+    return bytes(out)
+
+
 def clean_jpg(data: bytes) -> bytes:
-    img = Image.open(io.BytesIO(data))
+    cleaned = strip_jpeg_segments(data)
+    # Pillowで再エンコードして残存メタデータを完全除去
+    img = Image.open(io.BytesIO(cleaned))
     out = io.BytesIO()
-    # Strip all metadata by saving without exif/info
-    img.save(out, format='JPEG', quality=95, exif=b'')
+    img.save(out, format='JPEG', quality=95, exif=b'', subsampling=0)
     return out.getvalue()
 
 
 def clean_png(data: bytes) -> bytes:
     img = Image.open(io.BytesIO(data))
     out = io.BytesIO()
-    # Save with empty metadata dict to strip all chunks
+    # pnginfo=None でtEXt/iTXt/zTXt/tIME等のメタデータチャンクを全て除去
     img.save(out, format='PNG', optimize=True, pnginfo=None)
     return out.getvalue()
 
@@ -177,8 +209,17 @@ def clean_pdf(data: bytes) -> bytes:
     writer = pypdf.PdfWriter()
     for page in reader.pages:
         writer.add_page(page)
-    # Clear all metadata
-    writer.add_metadata({})
+    # 全メタデータ（作成者・所有者・ソフトウェア・日時）を除去
+    writer.add_metadata({
+        '/Producer': '',
+        '/Creator': '',
+        '/Author': '',
+        '/Title': '',
+        '/Subject': '',
+        '/Keywords': '',
+        '/CreationDate': '',
+        '/ModDate': '',
+    })
     out = io.BytesIO()
     writer.write(out)
     return out.getvalue()
