@@ -246,9 +246,26 @@ def clean_jpg(data: bytes) -> bytes:
 
     segments = _parse_jpeg_segments(data)
 
+    # 元ファイルにAPP0があるか確認
+    has_app0 = any(
+        kind == 'SEG' and marker == 0xe0 and seg_data[2:7] == b'JFIF\x00'
+        for kind, marker, seg_data in segments
+    )
+
     out = bytearray(b'\xff\xd8')
 
-    # ICCプロファイルを最初に挿入
+    # APP0がない場合、DPI情報を持つ最小限のJFIFセグメントを先頭に挿入
+    if dpi and not has_app0:
+        x_dpi = max(1, round(dpi[0]))
+        y_dpi = max(1, round(dpi[1]))
+        jfif = (b'JFIF\x00'   # identifier
+                b'\x01\x01'   # version 1.1
+                + bytes([1])  # density units: DPI
+                + struct.pack('>HH', x_dpi, y_dpi)  # Xdensity, Ydensity
+                + b'\x00\x00')  # thumbnail size (none)
+        out += b'\xff\xe0' + struct.pack('>H', len(jfif) + 2) + jfif
+
+    # ICCプロファイルを挿入
     if icc_profile:
         out += _build_icc_segments(icc_profile)
 
@@ -266,11 +283,13 @@ def clean_jpg(data: bytes) -> bytes:
             if (0xe1 <= marker <= 0xef) or marker == 0xfe:
                 continue
             # APP0（JFIF）にDPIを上書き
-            if marker == 0xe0 and seg_data[2:7] == b'JFIF\x00' and dpi:
+            if marker == 0xe0 and len(seg_data) >= 14 and seg_data[2:7] == b'JFIF\x00' and dpi:
                 seg = bytearray(seg_data)
+                x_dpi = max(1, round(dpi[0]))
+                y_dpi = max(1, round(dpi[1]))
                 seg[9] = 1  # 解像度単位: DPI
-                struct.pack_into('>H', seg, 10, round(dpi[0]))  # 水平DPI
-                struct.pack_into('>H', seg, 12, round(dpi[1]))  # 垂直DPI
+                struct.pack_into('>H', seg, 10, x_dpi)
+                struct.pack_into('>H', seg, 12, y_dpi)
                 out += bytes([0xff, marker]) + bytes(seg)
                 continue
             out += bytes([0xff, marker]) + seg_data
