@@ -264,10 +264,11 @@ def process():
                 continue
             results.append((out_name, cleaned))
         except Exception as e:
-            errors.append(f'{name}: {str(e)}')
+            import traceback
+            errors.append(f'{name}: {str(e)} ({traceback.format_exc()[-200:]})')
 
     if not results:
-        return jsonify({'error': '処理できたファイルがありません: ' + ', '.join(errors)}), 400
+        return jsonify({'error': '処理できたファイルがありません: ' + ' / '.join(errors)}), 400
 
     if len(results) == 1:
         out_name, cleaned = results[0]
