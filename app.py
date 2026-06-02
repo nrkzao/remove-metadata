@@ -239,26 +239,36 @@ def _build_icc_segments(icc_profile: bytes) -> bytes:
 
 def clean_jpg(data: bytes) -> bytes:
     """JPEGバイナリを直接操作してメタデータ除去（DPI・ICCプロファイルは保持）"""
-    # Pillowヘッダ読み込みでDPI・ICC・色空間のみ取得（画像展開なし）
+    # Pillowヘッダ読み込みでDPI・ICC・技術タグのみ取得（画像展開なし）
     hdr = Image.open(io.BytesIO(data))
     icc_profile = hdr.info.get('icc_profile')
     dpi = hdr.info.get('dpi')  # (x, y) または None
 
-    # ICCプロファイルがない場合、ExifのColorSpaceタグからsRGBを判定して埋め込む
+    # 保持するExifタグ（技術情報のみ・個人情報は含まない）
+    # 0x011A=XResolution, 0x011B=YResolution, 0x0128=ResolutionUnit,
+    # 0xA001=ColorSpace, 0xA002=PixelXDimension, 0xA003=PixelYDimension,
+    # 0x0213=YCbCrPositioning
+    KEEP_TAGS = {0x011A, 0x011B, 0x0128, 0xA001, 0xA002, 0xA003, 0x0213}
+    minimal_exif_bytes = None
+    try:
+        src_exif = hdr.getexif()
+        clean_exif = Image.Exif()
+        for tag in KEEP_TAGS:
+            if tag in src_exif:
+                clean_exif[tag] = src_exif[tag]
+        if len(clean_exif) > 0:
+            minimal_exif_bytes = clean_exif.tobytes()
+    except Exception:
+        pass
+
+    # ICCプロファイルがない場合、ExifのColorSpace=1(sRGB)からプロファイルを生成
     if not icc_profile:
-        exif_data = hdr.info.get('exif', b'')
-        color_space_is_srgb = False
-        if exif_data:
-            try:
-                exif = hdr.getexif()
-                # ColorSpace tag = 0xA001, 値1 = sRGB
-                if exif.get(0xA001) == 1:
-                    color_space_is_srgb = True
-            except Exception:
-                pass
-        if color_space_is_srgb:
-            srgb = ImageCms.createProfile('sRGB')
-            icc_profile = ImageCms.ImageCmsProfile(srgb).tobytes()
+        try:
+            if hdr.getexif().get(0xA001) == 1:
+                srgb = ImageCms.createProfile('sRGB')
+                icc_profile = ImageCms.ImageCmsProfile(srgb).tobytes()
+        except Exception:
+            pass
 
     segments = _parse_jpeg_segments(data)
 
@@ -280,6 +290,10 @@ def clean_jpg(data: bytes) -> bytes:
                 + struct.pack('>HH', x_dpi, y_dpi)  # Xdensity, Ydensity
                 + b'\x00\x00')  # thumbnail size (none)
         out += b'\xff\xe0' + struct.pack('>H', len(jfif) + 2) + jfif
+
+    # 最小限のExif（技術タグのみ）を挿入
+    if minimal_exif_bytes and len(minimal_exif_bytes) > 4:
+        out += b'\xff\xe1' + struct.pack('>H', len(minimal_exif_bytes) + 2) + minimal_exif_bytes
 
     # ICCプロファイルを挿入
     if icc_profile:
