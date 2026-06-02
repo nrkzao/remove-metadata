@@ -192,18 +192,69 @@ def index():
 
 
 def clean_jpg(data: bytes) -> bytes:
-    img = Image.open(io.BytesIO(data))
-    img.load()
-    out = io.BytesIO()
-    # Pillowで再保存するとExif/XMP/IPTC/コメントは引き継がれない
-    img.save(out, format='JPEG', quality=95, exif=b'')
-    return out.getvalue()
+    """JPEGバイナリを直接操作してメタデータセグメントを除去（再圧縮なし）"""
+    if len(data) < 4 or data[:2] != b'\xff\xd8':
+        raise ValueError('JPEGファイルではありません')
+
+    out = bytearray(b'\xff\xd8')
+    i = 2
+
+    while i < len(data):
+        # 0xff を探す
+        if data[i] != 0xff:
+            # SOS以降の生データ（ここに来るのは構造が壊れている場合のみ）
+            out.extend(data[i:])
+            break
+
+        # 連続する 0xff をスキップ（パディング）
+        while i < len(data) and data[i] == 0xff:
+            i += 1
+        if i >= len(data):
+            break
+
+        marker = data[i]
+        i += 1
+
+        # EOI（画像終端）
+        if marker == 0xd9:
+            out.extend(b'\xff\xd9')
+            break
+
+        # RST0-RST7（長さフィールドなし）
+        if 0xd0 <= marker <= 0xd7:
+            out.extend(bytes([0xff, marker]))
+            continue
+
+        # 長さフィールドを読む
+        if i + 2 > len(data):
+            break
+        seg_len = int.from_bytes(data[i:i+2], 'big')
+        seg_end = i + seg_len
+        seg_data = data[i:seg_end]
+        i = seg_end
+
+        # SOS（Start of Scan）: ヘッダの後は生の圧縮データ → 残り全部を追記して終了
+        if marker == 0xda:
+            out.extend(b'\xff\xda')
+            out.extend(seg_data)
+            out.extend(data[i:])
+            break
+
+        # 削除対象: APP1〜APP15（Exif/XMP/IPTC等）、COM（コメント）
+        if (0xe1 <= marker <= 0xef) or marker == 0xfe:
+            continue  # スキップ
+
+        # それ以外（APP0/JFIF、SOF、DHT、DQT 等）は保持
+        out.extend(bytes([0xff, marker]))
+        out.extend(seg_data)
+
+    return bytes(out)
 
 
 def clean_png(data: bytes) -> bytes:
     img = Image.open(io.BytesIO(data))
+    img.load()
     out = io.BytesIO()
-    # pnginfo=None でtEXt/iTXt/zTXt/tIME等のメタデータチャンクを全て除去
     img.save(out, format='PNG', optimize=True, pnginfo=None)
     return out.getvalue()
 
