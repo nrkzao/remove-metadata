@@ -1,5 +1,6 @@
 import os
 import io
+import struct
 import zipfile
 from flask import Flask, request, send_file, render_template_string, jsonify
 from PIL import Image, ImageFile
@@ -191,62 +192,88 @@ def index():
     return render_template_string(HTML)
 
 
-def clean_jpg(data: bytes) -> bytes:
-    """JPEGバイナリを直接操作してメタデータセグメントを除去（再圧縮なし）"""
-    if len(data) < 4 or data[:2] != b'\xff\xd8':
+def _parse_jpeg_segments(data: bytes):
+    """JPEGセグメントをパースしてリストで返す"""
+    if data[:2] != b'\xff\xd8':
         raise ValueError('JPEGファイルではありません')
-
-    out = bytearray(b'\xff\xd8')
+    segments = []
     i = 2
-
     while i < len(data):
-        # 0xff を探す
         if data[i] != 0xff:
-            # SOS以降の生データ（ここに来るのは構造が壊れている場合のみ）
-            out.extend(data[i:])
+            segments.append(('RAW', None, data[i:]))
             break
-
-        # 連続する 0xff をスキップ（パディング）
         while i < len(data) and data[i] == 0xff:
             i += 1
         if i >= len(data):
             break
-
-        marker = data[i]
-        i += 1
-
-        # EOI（画像終端）
+        marker = data[i]; i += 1
         if marker == 0xd9:
-            out.extend(b'\xff\xd9')
+            segments.append(('EOI', marker, b''))
             break
-
-        # RST0-RST7（長さフィールドなし）
         if 0xd0 <= marker <= 0xd7:
-            out.extend(bytes([0xff, marker]))
+            segments.append(('RST', marker, b''))
             continue
-
-        # 長さフィールドを読む
         if i + 2 > len(data):
             break
         seg_len = int.from_bytes(data[i:i+2], 'big')
-        seg_end = i + seg_len
-        seg_data = data[i:seg_end]
-        i = seg_end
-
-        # SOS（Start of Scan）: ヘッダの後は生の圧縮データ → 残り全部を追記して終了
-        if marker == 0xda:
-            out.extend(b'\xff\xda')
-            out.extend(seg_data)
-            out.extend(data[i:])
+        seg_data = data[i:i+seg_len]; i += seg_len
+        if marker == 0xda:  # SOS
+            segments.append(('SOS', marker, seg_data + data[i:]))
             break
+        segments.append(('SEG', marker, seg_data))
+    return segments
 
-        # 削除対象: APP1〜APP15（Exif/XMP/IPTC等）、COM（コメント）
-        if (0xe1 <= marker <= 0xef) or marker == 0xfe:
-            continue  # スキップ
 
-        # それ以外（APP0/JFIF、SOF、DHT、DQT 等）は保持
-        out.extend(bytes([0xff, marker]))
-        out.extend(seg_data)
+def _build_icc_segments(icc_profile: bytes) -> bytes:
+    """ICCプロファイルをAPP2セグメントとして再構築"""
+    chunk_size = 65519
+    total = (len(icc_profile) + chunk_size - 1) // chunk_size
+    result = bytearray()
+    for seq in range(total):
+        chunk = icc_profile[seq * chunk_size:(seq + 1) * chunk_size]
+        header = b'ICC_PROFILE\x00' + bytes([seq + 1, total])
+        payload = header + chunk
+        result += b'\xff\xe2' + struct.pack('>H', len(payload) + 2) + payload
+    return bytes(result)
+
+
+def clean_jpg(data: bytes) -> bytes:
+    """JPEGバイナリを直接操作してメタデータ除去（DPI・ICCプロファイルは保持）"""
+    # Pillowヘッダ読み込みでDPIとICCのみ取得（画像展開なし）
+    hdr = Image.open(io.BytesIO(data))
+    icc_profile = hdr.info.get('icc_profile')
+    dpi = hdr.info.get('dpi')  # (x, y) または None
+
+    segments = _parse_jpeg_segments(data)
+
+    out = bytearray(b'\xff\xd8')
+
+    # ICCプロファイルを最初に挿入
+    if icc_profile:
+        out += _build_icc_segments(icc_profile)
+
+    for kind, marker, seg_data in segments:
+        if kind == 'RAW':
+            out += seg_data
+        elif kind == 'EOI':
+            out += b'\xff\xd9'
+        elif kind == 'RST':
+            out += bytes([0xff, marker])
+        elif kind == 'SOS':
+            out += b'\xff\xda' + seg_data
+        elif kind == 'SEG':
+            # APP1〜APP15（Exif/XMP/IPTC）とCOMは除去
+            if (0xe1 <= marker <= 0xef) or marker == 0xfe:
+                continue
+            # APP0（JFIF）にDPIを上書き
+            if marker == 0xe0 and seg_data[2:7] == b'JFIF\x00' and dpi:
+                seg = bytearray(seg_data)
+                seg[9] = 1  # 解像度単位: DPI
+                struct.pack_into('>H', seg, 10, round(dpi[0]))  # 水平DPI
+                struct.pack_into('>H', seg, 12, round(dpi[1]))  # 垂直DPI
+                out += bytes([0xff, marker]) + bytes(seg)
+                continue
+            out += bytes([0xff, marker]) + seg_data
 
     return bytes(out)
 
