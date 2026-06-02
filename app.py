@@ -3,7 +3,7 @@ import io
 import struct
 import zipfile
 from flask import Flask, request, send_file, render_template_string, jsonify
-from PIL import Image, ImageFile
+from PIL import Image, ImageFile, ImageCms
 import pypdf
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -239,10 +239,26 @@ def _build_icc_segments(icc_profile: bytes) -> bytes:
 
 def clean_jpg(data: bytes) -> bytes:
     """JPEGバイナリを直接操作してメタデータ除去（DPI・ICCプロファイルは保持）"""
-    # Pillowヘッダ読み込みでDPIとICCのみ取得（画像展開なし）
+    # Pillowヘッダ読み込みでDPI・ICC・色空間のみ取得（画像展開なし）
     hdr = Image.open(io.BytesIO(data))
     icc_profile = hdr.info.get('icc_profile')
     dpi = hdr.info.get('dpi')  # (x, y) または None
+
+    # ICCプロファイルがない場合、ExifのColorSpaceタグからsRGBを判定して埋め込む
+    if not icc_profile:
+        exif_data = hdr.info.get('exif', b'')
+        color_space_is_srgb = False
+        if exif_data:
+            try:
+                exif = hdr.getexif()
+                # ColorSpace tag = 0xA001, 値1 = sRGB
+                if exif.get(0xA001) == 1:
+                    color_space_is_srgb = True
+            except Exception:
+                pass
+        if color_space_is_srgb:
+            srgb = ImageCms.createProfile('sRGB')
+            icc_profile = ImageCms.ImageCmsProfile(srgb).tobytes()
 
     segments = _parse_jpeg_segments(data)
 
