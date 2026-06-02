@@ -245,18 +245,25 @@ def clean_jpg(data: bytes) -> bytes:
     dpi = hdr.info.get('dpi')  # (x, y) または None
 
     # 保持するExifタグ（技術情報のみ・個人情報は含まない）
-    # 0x011A=XResolution, 0x011B=YResolution, 0x0128=ResolutionUnit,
-    # 0xA001=ColorSpace, 0xA002=PixelXDimension, 0xA003=PixelYDimension,
-    # 0x0213=YCbCrPositioning
-    KEEP_TAGS = {0x011A, 0x011B, 0x0128, 0xA001, 0xA002, 0xA003, 0x0213}
+    # メインIFD: XResolution, YResolution, ResolutionUnit, YCbCrPositioning
+    KEEP_IFD0 = {0x011A, 0x011B, 0x0128, 0x0213}
+    # ExifサブIFD (0x8769): ColorSpace, PixelXDimension, PixelYDimension
+    KEEP_EXIF = {0xA001, 0xA002, 0xA003}
     minimal_exif_bytes = None
     try:
         src_exif = hdr.getexif()
         clean_exif = Image.Exif()
-        for tag in KEEP_TAGS:
+        # メインIFDタグを設定
+        for tag in KEEP_IFD0:
             if tag in src_exif:
                 clean_exif[tag] = src_exif[tag]
-        if len(clean_exif) > 0:
+        # ExifサブIFDタグを正しいIFDに設定
+        src_sub = src_exif.get_ifd(0x8769)
+        dst_sub = clean_exif.get_ifd(0x8769)
+        for tag in KEEP_EXIF:
+            if tag in src_sub:
+                dst_sub[tag] = src_sub[tag]
+        if len(clean_exif) > 0 or len(dst_sub) > 0:
             minimal_exif_bytes = clean_exif.tobytes()
     except Exception:
         pass
@@ -264,7 +271,8 @@ def clean_jpg(data: bytes) -> bytes:
     # ICCプロファイルがない場合、ExifのColorSpace=1(sRGB)からプロファイルを生成
     if not icc_profile:
         try:
-            if hdr.getexif().get(0xA001) == 1:
+            sub = hdr.getexif().get_ifd(0x8769)
+            if sub.get(0xA001) == 1:
                 srgb = ImageCms.createProfile('sRGB')
                 icc_profile = ImageCms.ImageCmsProfile(srgb).tobytes()
         except Exception:
